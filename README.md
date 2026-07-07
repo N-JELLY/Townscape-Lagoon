@@ -26,17 +26,9 @@ npm install
 npm run dev        # http://localhost:5173 で確認
 ```
 
-XRift へのアップロード：
-
-```bash
-npm install -g @xrift/cli
-xrift login
-xrift upload        # xrift.json から自動判定
-```
-
 その他のコマンド：`npm run build`（本番ビルド）/ `npm run typecheck`（型チェック）。
 
-## 自分の Townscaper の街に差し替える
+XRift へのログイン・アップロード手順は [XRift 公式ドキュメント](https://docs.xrift.net/) を参照してください。ワールドのタイトル・説明・サムネイルは `xrift.json` の `world.title` / `world.description` / `world.thumbnailPath` で定義します。
 
 1. Townscaper 本体で街を開き、**Export OBJ**（`%USERPROFILE%\AppData\LocalLow\Oskar Stalberg\Townscaper\ObjExports\` などに出力される）。
 2. 出力された `Town???.obj` と `TownColor.png` を、このリポジトリの `public/` に **`Town.obj` / `TownColor.png`** という名前でコピー。
