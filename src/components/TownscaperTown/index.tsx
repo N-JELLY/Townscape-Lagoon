@@ -18,9 +18,11 @@ import { useXRift } from '@xrift/world-components'
  * 参考: https://reindernijhoff.net/2021/11/townscapers-rendering-style-in-webgl/
  */
 
-// Color tune points used by water and reflections.
-const DEEP_COLOR = new THREE.Color(0x3f7280) // reflection/deep-water tint
-const OCEAN_COLOR = new THREE.Color(0x3f8794) // large far-water plane color
+// 水面・反射で使う色の調整点
+const DEEP_COLOR = new THREE.Color(0x3f7280) // 反射・深い水の色味 (uDeepColor 用)
+// 水の色は1色に統一する (index.html と同じ考え方)。反射のフェード先・水底(deepWater)・
+// 遠景水面(farWater) を全部この色にすると、水面の高さが一致していても継ぎ目やパッチが出ない。
+const REFLECTION_WATER_COLOR = new THREE.Color(0x4aaab5) // 統一する水色 (ラグーンのティール)
 
 const vertexShader = /* glsl */ `
   uniform float uTime;
@@ -35,18 +37,14 @@ const vertexShader = /* glsl */ `
     vec4 wp = modelMatrix * vec4(position, 1.0);
 
     #ifdef REFLECTION
-      // Reflection wobble tune points:
-      // - fade controls distortion strength.
-      // - waveA/B/C multipliers control frequency and speed.
+      // 反射像の揺らぎ: 水面から深いほど強く歪ませる。
+      // Y は動かさない (discard 境界がギザつくため)。XZ のみ。
+      // 調整点: amp が揺らぎの強さ、係数 (0.55/0.42) が波長、uTime 係数が速度。
       float dy = wp.y - uWaterY;
-      float depth = clamp(abs(dy), 0.0, 4.0);
-      float fade = 0.035 + depth * 0.032;
-      float waveA = sin(wp.z * 0.78 + uTime * 0.72);
-      float waveB = cos((wp.x + wp.z) * 0.46 - uTime * 0.55);
-      float waveC = sin((wp.x - wp.z) * 0.62 + uTime * 0.44);
-      wp.x += (waveA + waveB * 0.55) * fade;
-      wp.z += (cos(wp.x * 0.58 + uTime * 0.48) + waveC * 0.35) * fade * 0.75;
-      wp.y += (waveB - waveC) * fade * 0.30;
+      float depth = clamp(abs(dy), 0.0, 6.0);
+      float amp = 0.04 + depth * 0.06;
+      wp.x += sin(wp.z * 0.55 + uTime * 1.25) * amp;
+      wp.z += cos(wp.x * 0.42 + uTime * 1.05) * amp * 0.8;
     #endif
 
     vWorld = wp.xyz;
@@ -62,29 +60,42 @@ const fragmentShader = /* glsl */ `
   uniform float uPaletteY;
   uniform float uWaterY;
   uniform vec3  uDeepColor;
+  uniform vec3  uWaterColor;
   varying vec2 vUV;
   varying vec3 vNormal;
   varying vec3 vWorld;
 
+  // 彩度調整: 輝度を軸に色を伸縮する (s>1 で鮮やか)
+  vec3 adjustSaturation(vec3 color, float s) {
+    float luma = dot(color, vec3(0.2126, 0.7152, 0.0722));
+    return max(vec3(0.0), mix(vec3(luma), color, s));
+  }
+
   vec3 townLight(vec3 color, vec3 normal) {
     color *= color;
-    // Toon lighting tune points:
-    // - sunDir/fillDir set light direction.
-    // - vec3 light terms below set ambient, sun, sky bounce, and fill colors.
+    // トゥーン調ライティングの調整点:
+    // - sunDir/fillDir はライト方向。
+    // - 下の vec3 の各項がアンビエント・太陽・空バウンス・フィルの色。
     vec3 sunDir = normalize(vec3(0.45, 0.75, 0.28));
     vec3 fillDir = normalize(vec3(-0.55, 0.35, -0.45));
     float sun = smoothstep(-0.25, 0.85, dot(normal, sunDir));
     float toonSun = mix(floor(sun * 3.0) / 3.0, sun, 0.55);
     float sky = smoothstep(-0.45, 0.95, normal.y);
     float fill = smoothstep(-0.35, 0.8, dot(normal, fillDir));
+    // 夏の直射日光の配合: 太陽を主役 (強く暖色) にし、アンビエントは低め・青めにして
+    // 日向と日陰のコントラストを立てる。アンビエントを上げすぎると全体がパステル化する。
     vec3 light =
-      vec3(0.58, 0.68, 0.72) +
-      toonSun * vec3(0.82, 0.67, 0.48) +
-      sky * vec3(0.20, 0.34, 0.40) +
-      fill * vec3(0.12, 0.26, 0.32);
+      vec3(0.30, 0.36, 0.42) +
+      toonSun * vec3(1.5, 1.5, 1.5) +
+      sky * vec3(0.10, 0.20, 0.26) +
+      fill * vec3(0.06, 0.14, 0.20);
     vec3 lit = sqrt(max(color * light, vec3(0.0)));
-    lit = mix(lit, vec3(1.0) - exp(-lit * 1.25), 0.45);
-    return clamp(lit + vec3(0.025, 0.03, 0.035), 0.0, 1.0);
+    // ハイライト圧縮は弱めに (強いと明色が白へ寄り彩度が落ちる)
+    lit = mix(lit, vec3(1.0) - exp(-lit * 1.25), 0.18);
+    // 彩度を持ち上げて夏の日差しの鮮やかさを出す
+    lit = adjustSaturation(lit, 1.32);
+    // 黒の持ち上げは最小限に (大きいと影が白ちゃける)
+    return clamp(lit + vec3(0.012, 0.014, 0.016), 0.0, 1.0);
   }
 
   void main() {
@@ -123,18 +134,27 @@ const fragmentShader = /* glsl */ `
 
     #ifdef REFLECTION
       if (vWorld.y > uWaterY - 0.001) discard;
-      float depthFade = smoothstep(0.0, 4.0, abs(vWorld.y - uWaterY));
-      // Reflection tint tune point: higher mix values make reflections bluer and less literal.
-      vec3 rcol = mix(col, uDeepColor, 0.82 + 0.14 * depthFade);
-      // Reflection darkness tune point: lower values make distant/deeper reflections sink into the water.
-      rcol *= mix(0.70, 0.48, depthFade);
+      #ifdef FENCING
+        if (detailCol.a < 0.4) discard;
+        col = detailCol.rgb;
+      #endif
+      // フェードはα(透明度)ではなく「色を水色へ溶かす」方式で行う。
+      // 透明ブレンドにすると描画順の都合で水面シートの色が反射の上に乗らず、
+      // 反射部分だけ水の被膜が剥がれたような見た目になるため、不透明のまま色で溶かす。
+      // フェード距離の調整点: 6.0 (ワールドm)。水底プレーン(deepWater)の深さと
+      // 揃える。深部で完全に uWaterColor へ溶かすので、そこと同色の水底に
+      // 反射が吸い込まれ、切れ目が出ない。
+      float dy = uWaterY - vWorld.y;
+      float depthFade = smoothstep(0.0, 6.0, dy);
+      // 0.45〜1.0: 水面直下は反射をはっきり残し、深部は水底と同じ水色へ完全に溶かす。
+      vec3 rcol = mix(col, uWaterColor, 0.45 + 0.55 * depthFade);
       gl_FragColor = vec4(rcol, 1.0);
       return;
     #endif
 
     #ifdef WATER
       float wy = vUV.y * 128.0 - 58.0;
-      // Water animation tune point: 58..73 is the TownColor water band; 1.5 is scroll speed.
+      // 水面アニメの調整点: 58〜73 が TownColor の水帯、1.5 はスクロール速度。
       float waveV = mod(wy - uTime * 1.5, 15.0) / 128.0 + 58.0 / 128.0;
       vec4 waterDetailCol = texture2D(uColorTex, vec2(vUV.x, waveV));
       // 波紋は乗算で合成 (1.8倍で正規化: 泡の白は明るく、青は水色を軽く沈める)
@@ -151,7 +171,7 @@ const fragmentShader = /* glsl */ `
 
     #ifdef WATER
       float shore = 1.0 - smoothstep(0.0, 16.0, wy);
-      // Water alpha tune point: lower values show more reflection/sky, higher values make the sea flatter.
+      // 水面の不透明度の調整点: 小さいほど反射・空が透け、大きいほど海がのっぺりする。
       float alpha = mix(0.16, 0.34, shore);
       gl_FragColor = vec4(col, alpha);
     #else
@@ -202,7 +222,7 @@ function mirrorGeometryX(source: THREE.BufferGeometry): THREE.BufferGeometry {
     normal.needsUpdate = true
   }
 
-  // Mirroring changes triangle winding, so swap b/c to keep front faces and lighting correct.
+  // ミラーで三角形の巻き順が反転するため、b/c を入れ替えて表面と陰影を正しく保つ
   const index = geometry.getIndex()
   if (index) {
     const array = index.array
@@ -256,6 +276,7 @@ export const TownscaperTown: React.FC<TownscaperTownProps> = ({
       uPaletteY: { value: 0.25 },
       uWaterY: { value: 0 },
       uDeepColor: { value: DEEP_COLOR },
+      uWaterColor: { value: REFLECTION_WATER_COLOR },
     })
     const makeMaterial = (
       defines: Record<string, string>,
@@ -273,9 +294,11 @@ export const TownscaperTown: React.FC<TownscaperTownProps> = ({
     const townMaterial = makeMaterial({})
     const waterMaterial = makeMaterial({ WATER: '' }, { transparent: true, depthWrite: false })
     const fenceMaterial = makeMaterial({ FENCING: '' })
-    // depthWrite必須: 無いと鏡像の隠面が消えず裏側のポリゴンが透けて見える
-    // Reflection material tune point: color/tint lives in the REFLECTION shader block above.
-    const reflectionMaterial = makeMaterial({ REFLECTION: '' }, { depthWrite: false })
+    // 反射は不透明で描く (index.html と同じ最小構成): 透明にすると水面シートの色が
+    // 反射の上に乗らず見た目が崩れる。depthWrite はデフォルト(true)のまま。
+    // polygonOffset 等の小細工は入れない — 入れると深度がずれて反射が汚くなる。
+    const reflectionMaterial = makeMaterial({ REFLECTION: '' })
+    const reflectionFenceMaterial = makeMaterial({ REFLECTION: '', FENCING: '' })
 
     // --- 窓・ドアのくり抜き (ステンシルパリティ方式 / Carmack's reverse系) ---
     // ホストのWebGLコンテキストにステンシルバッファが無い場合はデプスリセットが
@@ -332,13 +355,14 @@ export const TownscaperTown: React.FC<TownscaperTownProps> = ({
       waterMaterial,
       fenceMaterial,
       reflectionMaterial,
+      reflectionFenceMaterial,
       windowLiningMaterial,
     ]
 
     // --- OBJの組み立て ---
     const group = sourceObj.clone(true)
-    // Townscaper OBJ appears mirrored in XRift; mirror geometry data, not parent scale,
-    // so normals, stencils, reflections, and generated colliders all stay aligned.
+    // Townscaper の OBJ は XRift 上で鏡像になる。親スケールではなくジオメトリ自体を反転し、
+    // 法線・ステンシル・反射・生成コライダーの整合をすべて保つ。
     group.traverse((child) => {
       if ((child as THREE.Mesh).isMesh) {
         const mesh = child as THREE.Mesh
@@ -406,7 +430,10 @@ export const TownscaperTown: React.FC<TownscaperTownProps> = ({
     const reflectionGroup = new THREE.Group()
     for (const name of ['House', 'Fencing', 'Plants', 'Props', 'Birds']) {
       if (!meshes[name]) continue
-      const mirrored = new THREE.Mesh(meshes[name].geometry, reflectionMaterial)
+      const mirrored = new THREE.Mesh(
+        meshes[name].geometry,
+        name === 'Fencing' ? reflectionFenceMaterial : reflectionMaterial,
+      )
       mirrored.renderOrder = -1
       reflectionGroup.add(mirrored)
     }
@@ -414,21 +441,36 @@ export const TownscaperTown: React.FC<TownscaperTownProps> = ({
     reflectionGroup.position.y = 2 * localWaterY
     group.add(reflectionGroup)
 
-    // 深い水の底
-    // 遠景の水面 (OBJの水メッシュは島の周囲だけなので外側を大きな面で埋める)
+    // 水底の色ベース: 反射の背後を埋める単なる「背景色」のプレーン。
+    // depthWrite無効が重要: デプスを書くと、視線が斜めのとき遠くの (まだフェード
+    // し切っていない) 鏡像より先にこの板に当たり、反射が板のラインでスパッと
+    // 切れてしまう。デプスを書かなければ反射は常にこの上に描かれ、フェードし切った
+    // 鏡像は板と同色 (REFLECTION_WATER_COLOR) なので自然に消える。
+    // 板自体も「2枚目の水面」として認識されなくなる。
+    // 半径は SkyDome (450) に合わせて拡大 (150 * TOWN_SCALE3 = 450)。円の縁を地平線に隠す。
+    const deepWater = new THREE.Mesh(
+      new THREE.CircleGeometry(150, 96).rotateX(-Math.PI / 2),
+      new THREE.MeshBasicMaterial({ color: REFLECTION_WATER_COLOR, depthWrite: false }),
+    )
+    deepWater.position.y = localWaterY - 2
+    deepWater.renderOrder = -2
+    group.add(deepWater)
+
+    // 遠景の水面 (OBJの水メッシュは島の周囲だけなので外側を大きな面で埋める)。
+    // index.html と同じく deepWater・反射フェード先と「同一色」にして継ぎ目を消す。
+    // 色が揃っていれば deepWater との高さ差や円の縁が出ても見えなくなる。
+    // 深度書き込みはしないので同一面でも z-fighting は起きない。
+    // 半径は deepWater と揃えて地平線まで届かせ、円の縁の線を隠す。
     const farWater = new THREE.Mesh(
-      new THREE.CircleGeometry(80, 64).rotateX(-Math.PI / 2),
+      new THREE.CircleGeometry(150, 96).rotateX(-Math.PI / 2),
       new THREE.MeshBasicMaterial({
-        // Far-water tune point: this is the single large non-animated ocean sheet.
-        color: OCEAN_COLOR,
+        color: REFLECTION_WATER_COLOR,
         transparent: true,
-        // Higher opacity hides sky/reflection bleed; lower opacity makes the water feel glassier.
-        opacity: 0.88,
+        opacity: 0.36,
         depthWrite: false,
       }),
     )
-    // Keep this slightly below the OBJ Water mesh to avoid z-fighting and a visible second sea layer.
-    farWater.position.y = waterY - 0.035
+    farWater.position.y = localWaterY - 0.002
     farWater.renderOrder = 1
     group.add(farWater)
 
@@ -442,20 +484,25 @@ export const TownscaperTown: React.FC<TownscaperTownProps> = ({
       colliderGroup.add(collider)
     }
 
-    return { group, animatedMaterials, colliderGroup, waterY }
+    return { group, animatedMaterials, colliderGroup, waterY, localWaterY }
   }, [sourceObj, colorTex, paletteTex, materialTex, gl])
+
+  const waterPoint = useMemo(() => new THREE.Vector3(), [])
 
   useFrame((state) => {
     const t = state.clock.getElapsedTime()
+    built.group.updateWorldMatrix(true, false)
+    const worldWaterY = built.group.localToWorld(waterPoint.set(0, built.localWaterY, 0)).y
     built.animatedMaterials.forEach((m) => {
       m.uniforms.uTime.value = t
+      m.uniforms.uWaterY.value = worldWaterY
     })
   })
 
   return (
     <group position={position} scale={scale}>
       <primitive object={built.group} />
-      {/* Colliders: OBJ groups House and Sand only. */}
+      {/* コライダー: OBJ の House と Sand グループのみ */}
       <RigidBody type="fixed" colliders="trimesh" includeInvisible friction={1} restitution={0}>
         <primitive object={built.colliderGroup} />
       </RigidBody>
